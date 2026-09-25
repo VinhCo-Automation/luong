@@ -62,7 +62,12 @@
                 </div>
                 <div>
                     <h1 class="text-lg font-bold text-slate-900 leading-tight">Công Cụ Tính Lương Theo Ngày Công</h1>
-                    <p class="text-xs text-slate-500">Tự động tính toán lương thực nhận & phụ cấp chuẩn xác</p>
+                    <p class="text-xs text-slate-500 flex items-center gap-2">
+                        Tự động tính toán lương thực nhận & phụ cấp chuẩn xác
+                        <span id="syncStatusBadge" class="hidden text-[10px] bg-brand-100 text-brand-700 px-2 py-0.5 rounded-full font-semibold">
+                            <i class="fa-solid fa-cloud-arrow-up mr-1"></i>Đã tự động lưu
+                        </span>
+                    </p>
                 </div>
             </div>
             <div class="flex items-center gap-2">
@@ -182,9 +187,24 @@
                                 class="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-brand-500">
                         </div>
 
-                        <button onclick="resetDefaults()" class="text-xs text-brand-600 font-semibold hover:underline flex items-center gap-1 pt-1">
-                            <i class="fa-solid fa-rotate-left"></i> Khôi phục dữ liệu mẫu ban đầu
-                        </button>
+                        <!-- JSON File Import / Export Action Controls -->
+                        <div class="pt-2 border-t border-slate-100 flex flex-wrap gap-2 justify-between items-center text-xs">
+                            <div class="flex items-center gap-1.5">
+                                <button onclick="exportJSON()" class="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg transition flex items-center gap-1">
+                                    <i class="fa-solid fa-download text-slate-500"></i>
+                                    Xuất data.json
+                                </button>
+                                <button onclick="document.getElementById('jsonFileInput').click()" class="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg transition flex items-center gap-1">
+                                    <i class="fa-solid fa-upload text-slate-500"></i>
+                                    Tải file data.json
+                                </button>
+                                <input type="file" id="jsonFileInput" accept=".json" class="hidden" onchange="importJSON(event)">
+                            </div>
+                            
+                            <button onclick="resetDefaults()" class="text-xs text-brand-600 font-semibold hover:underline flex items-center gap-1 py-1">
+                                <i class="fa-solid fa-rotate-left"></i> Khôi phục mặc định
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -419,6 +439,107 @@
         </div>
     </footer>
 
+    <!-- Firebase SDK Imports & Auto-Sync Engine -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase State
+        let db = null;
+        let auth = null;
+        let userId = null;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'payroll-calculator-app';
+
+        let saveTimeout = null;
+
+        async function initCloudSync() {
+            try {
+                if (typeof __firebase_config !== 'undefined') {
+                    const firebaseConfig = JSON.parse(__firebase_config);
+                    const app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+
+                    userId = auth.currentUser ? auth.currentUser.uid : null;
+
+                    if (db && userId) {
+                        listenToSavedConfig();
+                    }
+                }
+            } catch (error) {
+                console.warn("Cloud persistence setup notice:", error);
+            }
+        }
+
+        // Realtime Listener to recover input values on page reload
+        function listenToSavedConfig() {
+            if (!db || !userId) return;
+            const docRef = doc(db, 'artifacts', appId, 'users', userId, 'settings', 'payroll_config');
+
+            onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    if (data) {
+                        if (data.actualDays !== undefined) {
+                            document.getElementById('actualDaysInput').value = data.actualDays;
+                            document.getElementById('actualDaysRange').value = data.actualDays;
+                        }
+                        if (data.baseSalary !== undefined) document.getElementById('baseSalary').value = data.baseSalary;
+                        if (data.phoneAllowance !== undefined) document.getElementById('phoneAllowance').value = data.phoneAllowance;
+                        if (data.lunchAllowance !== undefined) document.getElementById('lunchAllowance').value = data.lunchAllowance;
+                        if (data.standardDays !== undefined) {
+                            document.getElementById('standardDays').value = data.standardDays;
+                            document.getElementById('stdDaysIndicator').innerText = `Chuẩn: ${data.standardDays} ngày`;
+                        }
+
+                        // Recalculate salary with restored values
+                        if (typeof window.calculateSalary === 'function') {
+                            window.calculateSalary();
+                        }
+
+                        const statusBadge = document.getElementById('syncStatusBadge');
+                        if (statusBadge) statusBadge.classList.remove('hidden');
+                    }
+                }
+            }, (err) => console.error("Error loading saved data:", err));
+        }
+
+        // Auto Save trigger on user input
+        window.saveConfigToCloud = function() {
+            if (!db || !userId) return;
+
+            clearTimeout(saveTimeout);
+            saveTimeout = setTimeout(async () => {
+                try {
+                    const docRef = doc(db, 'artifacts', appId, 'users', userId, 'settings', 'payroll_config');
+                    const payload = {
+                        actualDays: parseFloat(document.getElementById('actualDaysInput').value) || 0,
+                        baseSalary: parseFloat(document.getElementById('baseSalary').value) || 0,
+                        phoneAllowance: parseFloat(document.getElementById('phoneAllowance').value) || 0,
+                        lunchAllowance: parseFloat(document.getElementById('lunchAllowance').value) || 0,
+                        standardDays: parseFloat(document.getElementById('standardDays').value) || 26,
+                        updatedAt: new Date().toISOString()
+                    };
+
+                    await setDoc(docRef, payload, { merge: true });
+                    const statusBadge = document.getElementById('syncStatusBadge');
+                    if (statusBadge) statusBadge.classList.remove('hidden');
+                } catch (err) {
+                    console.error("Error saving data:", err);
+                }
+            }, 400);
+        };
+
+        window.addEventListener('DOMContentLoaded', initCloudSync);
+    </script>
+
     <script>
         // State management
         let isRounded = false; // False = exact decimal mode like Excel image, True = rounded integer currency
@@ -449,20 +570,32 @@
                 if (val > 31) val = 31;
                 actualDaysRange.value = val;
                 calculateSalary();
+                if (window.saveConfigToCloud) window.saveConfigToCloud();
             });
 
             actualDaysRange.addEventListener('input', function() {
                 actualDaysInput.value = this.value;
                 calculateSalary();
+                if (window.saveConfigToCloud) window.saveConfigToCloud();
             });
 
             // Config input listeners
-            baseSalaryEl.addEventListener('input', calculateSalary);
-            phoneAllowanceEl.addEventListener('input', calculateSalary);
-            lunchAllowanceEl.addEventListener('input', calculateSalary);
+            baseSalaryEl.addEventListener('input', () => {
+                calculateSalary();
+                if (window.saveConfigToCloud) window.saveConfigToCloud();
+            });
+            phoneAllowanceEl.addEventListener('input', () => {
+                calculateSalary();
+                if (window.saveConfigToCloud) window.saveConfigToCloud();
+            });
+            lunchAllowanceEl.addEventListener('input', () => {
+                calculateSalary();
+                if (window.saveConfigToCloud) window.saveConfigToCloud();
+            });
             standardDaysEl.addEventListener('input', function() {
                 document.getElementById('stdDaysIndicator').innerText = `Chuẩn: ${this.value || 26} ngày`;
                 calculateSalary();
+                if (window.saveConfigToCloud) window.saveConfigToCloud();
             });
         }
 
@@ -473,6 +606,7 @@
             actualDaysInput.value = updated;
             actualDaysRange.value = updated;
             calculateSalary();
+            if (window.saveConfigToCloud) window.saveConfigToCloud();
         }
 
         // Quick Preset Days
@@ -480,6 +614,7 @@
             actualDaysInput.value = days;
             actualDaysRange.value = days;
             calculateSalary();
+            if (window.saveConfigToCloud) window.saveConfigToCloud();
         }
 
         // Format currency helper
@@ -621,6 +756,7 @@
             actualDaysRange.value = 25;
             document.getElementById('stdDaysIndicator').innerText = "Chuẩn: 26 ngày";
             calculateSalary();
+            if (window.saveConfigToCloud) window.saveConfigToCloud();
             showToast("Đã khôi phục dữ liệu mẫu ban đầu!");
         }
 
